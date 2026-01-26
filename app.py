@@ -1,108 +1,64 @@
-from xml.parsers.expat import model
 import streamlit as st
 import json
 import fitz  # PyMuPDF
 from pathlib import Path
 import tempfile
 import os
+import re
 from groq import Groq
-
+from docx import Document  # pip install python-docx
 
 # Page configuration
 st.set_page_config(
-    page_title="Feature Description Generator",
+    page_title="Requirement Analysis Tool",
     page_icon="📄",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
+# --- HELPER FUNCTIONS ---
 
-# def load_config(config_path: str = "config.json") -> dict:
-#     """Loads configuration values from the config.json file."""
-#     try:
-#         with open(config_path, "r", encoding="utf-8") as f:
-#             config = json.load(f)
-#         return config
-#     except FileNotFoundError:
-#         st.error(f"❌ Config file not found at {config_path}. Please create it first.")
-#         return {}
-#     except json.JSONDecodeError as e:
-#         st.error(f"❌ Error parsing config file: {e}")
-#         return {}
-
-api_key = st.secrets.get("groq_api_key")
-model_name = st.secrets.get("groq_default_model", "llama-3.3-70b-versatile")
-
-# Custom CSS for better styling
-st.markdown("""
-    <style>
-    .main-header {
-        font-size: 2.5rem;
-        font-weight: bold;
-        color: #1f77b4;
-        text-align: center;
-        margin-bottom: 0.5rem;
-    }
-    .sub-header {
-        text-align: center;
-        color: #666;
-        margin-bottom: 2rem;
-    }
-    .feature-box {
-        background-color: #f0f2f6;
-        padding: 1.5rem;
-        border-radius: 10px;
-        margin-bottom: 1rem;
-        border-left: 4px solid #1f77b4;
-    }
-    .success-message {
-        padding: 1rem;
-        background-color: #d4edda;
-        border-left: 4px solid #28a745;
-        border-radius: 5px;
-        margin: 1rem 0;
-    }
-    .stButton>button {
-        width: 100%;
-        background-color: #1f77b4;
-        color: white;
-        font-weight: bold;
-        border-radius: 5px;
-        padding: 0.5rem 1rem;
-    }
-    </style>
-    """, unsafe_allow_html=True)
-
-
-def extract_text_from_pdf(pdf_file) -> str:
-    """Extracts all text from an uploaded PDF file."""
+def load_config(config_path: str = "config.json") -> dict:
     try:
-        # Save uploaded file to temporary location
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
-            tmp_file.write(pdf_file.getvalue())
-            tmp_path = tmp_file.name
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def extract_text_from_file(uploaded_file) -> str:
+    """Extracts text from PDF, TXT, or DOCX."""
+    file_extension = Path(uploaded_file.name).suffix.lower()
+    
+    try:
+        if file_extension == ".pdf":
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp_file:
+                tmp_file.write(uploaded_file.getvalue())
+                tmp_path = tmp_file.name
+            doc = fitz.open(tmp_path)
+            text = "".join([page.get_text() for page in doc])
+            doc.close()
+            os.unlink(tmp_path)
+            return text
         
-        # Extract text
-        doc = fitz.open(tmp_path)
-        full_text = ""
-        for page in doc:
-            full_text += page.get_text()
-        doc.close()
+        elif file_extension == ".docx":
+            doc = Document(uploaded_file)
+            return "\n".join([para.text for para in doc.paragraphs])
         
-        # Clean up temp file
-        os.unlink(tmp_path)
-        
-        return full_text
+        elif file_extension == ".txt":
+            return str(uploaded_file.read(), "utf-8")
+            
+        return ""
     except Exception as e:
-        st.error(f"Error processing PDF: {e}")
+        st.error(f"Error processing {uploaded_file.name}: {e}")
         return ""
 
-
-def generate_feature_descriptions(document_text: str, feature_list: list, api_key: str, model_name: str) -> dict:
-    """Uses Google's Generative AI to create feature descriptions."""
+def generate_descriptions(document_text: str, feature_list: list, api_key: str, model_name: str, mode: str) -> dict:
+    """Uses Groq to extract requirements based on mode."""
     
-    prompt = f"""
-    You are a professional QA analyst. Your task is to create detailed descriptions of software features based on a Functional Specification Document (FSD). These descriptions will be used to write comprehensive test cases.
+    if mode == "Structured":
+        prompt = f"""
+           You are a professional QA analyst. Your task is to create detailed descriptions of software features based on a Functional Specification Document (FSD). These descriptions will be used to write comprehensive test cases.
 
     **Instructions:**
     1. Read the entire `DOCUMENT_TEXT` provided below.
@@ -123,25 +79,34 @@ def generate_feature_descriptions(document_text: str, feature_list: list, api_ke
     6. Before generating the feature description, please add the following paragraph at the start of each description:
         Generate the most comprehensive and detailed set of test cases for the following feature description. Each line in each workflow must be tested through multiple functional, alternate, negative, boundary, UI, API, and access-control scenarios to ensure complete coverage.
         Below is the feature description:
+        **FEATURE_LIST:** {json.dumps(feature_list)}
+        **DOCUMENT_TEXT:** {document_text}
+        """
+    else:
+        # Improved Unstructured Mode Prompt
+        prompt = f"""
+        You are a Master QA Requirements Engineer. Your goal is to perform a "Deep Extraction" of every single requirement, rule, and data point across multiple documents.
 
-    **FEATURE_LIST:**
-    {json.dumps(feature_list, indent=2)}
+        **CRITICAL INSTRUCTIONS:**
+        1. **Zero Omission:** Do not summarize. If the document mentions a specific validation, a character limit, a button color, or a background process, it MUST be included.
+        2. **Logical Grouping:** Organize the extracted information into high-level Section Headings.
+        3. **Comprehensive Detail:** For every requirement found, include:
+            - The specific rule or logic.
+            - Any data fields or formats mentioned.
+            - Dependencies (what must happen before/after).
+            - Error handling or "negative" paths described in the text.
+        4. **Multiple Files:** The text provided contains content from several files. Synthesize them so that related requirements from different files are grouped under the same heading.
+        5. **Formatting:** Return a valid JSON object. Each key is a Section Heading, and each value is a comprehensive, multi-paragraph string containing the detailed requirements.
 
-    **DOCUMENT_TEXT:**
-    ---
-    {document_text}
-    ---
+        **DOCUMENT_TEXT (Combined from all files):**
+        ---
+        {document_text}
+        ---
 
-    **OUTPUT (JSON Object Only):**
-    Respond with ONLY a valid JSON object. No explanations, no markdown, no extra text.
-    Example format:
-    {{
-      "Login Functionality": "Generate the most comprehensive... Below is the feature description: The user can log in using username and password...",
-      "Dashboard View": "..."
-    }}
-   
-    """
-    
+        **OUTPUT:**
+        Respond with ONLY a valid JSON object.
+        """
+
     try:
         client = Groq(api_key=api_key)
 
@@ -180,246 +145,177 @@ def generate_feature_descriptions(document_text: str, feature_list: list, api_ke
         return {}
 
 
-# Load configuration at startup
-# Initialize session state
-if 'descriptions' not in st.session_state:
-    st.session_state.descriptions = None
-if 'pdf_text' not in st.session_state:
-    st.session_state.pdf_text = None
+# --- UI STYLING ---
+# --- UI STYLING ---
+# --- UI STYLING ---
+st.markdown("""
+<style>
 
-# Load secrets from Streamlit Cloud
-api_key = st.secrets.get("groq_api_key", None)
-model_name = st.secrets.get("groq_default_model", "llama-3.3-70b-versatile")
+/* ================== BUTTONS ================== */
+div.stButton > button,
+div.stDownloadButton > button,
+button[kind="secondary"] {
+    background-color: #a3d8ff !important;
+    color: #000000 !important;
+    border: none;
+    border-radius: 8px;
+    font-weight: 600;
+}
 
-# Main UI
-st.markdown('<p class="main-header">📄 Feature Description Generator</p>', unsafe_allow_html=True)
-st.markdown('<p class="sub-header">Automatically generate detailed feature descriptions from your FSD documents using AI</p>', unsafe_allow_html=True)
+/* Hover */
+div.stButton > button:hover,
+div.stDownloadButton > button:hover,
+button[kind="secondary"]:hover {
+    background-color: #8ccfff !important;
+}
 
-# Sidebar for configuration
+/* Disabled */
+div.stButton > button:disabled {
+    background-color: #d9eefc !important;
+    color: #7a7a7a !important;
+}
+
+/* ================== FILE UPLOADER (Browse files) ================== */
+button[data-testid="stFileUploaderBrowseButton"] {
+    background-color: #a3d8ff !important;
+    color: #000000 !important;
+    border-radius: 8px;
+    font-weight: 600;
+}
+
+button[data-testid="stFileUploaderBrowseButton"]:hover {
+    background-color: #8ccfff !important;
+}
+
+/* ================== RADIO BUTTONS ================== */
+
+/* Remove any background highlight on label */
+.stRadio label {
+    background-color: transparent !important;
+}
+
+/* Radio outer circle */
+.stRadio input[type="radio"] {
+    accent-color: #a3d8ff;
+}
+
+/* Prevent row highlight on hover */
+.stRadio div[role="radiogroup"] label:hover {
+    background-color: transparent !important;
+}
+
+/* ================== HEADERS ================== */
+.main-header {
+    font-size: 2.5rem;
+    font-weight: bold;
+    text-align: center;
+}
+
+.feature-box {
+    background-color: #f0f8ff;
+    padding: 1.5rem;
+    border-radius: 10px;
+    margin-bottom: 1rem;
+    border-left: 4px solid #a3d8ff;
+}
+
+</style>
+""", unsafe_allow_html=True)
+
+
+
+# --- SESSION STATE & CONFIG ---
+config = load_config()
+api_key = config.get("groq_api_key", "")
+model_name = config.get("groq_default_model", "llama-3.3-70b-versatile")
+
+if 'descriptions' not in st.session_state: st.session_state.descriptions = None
+if 'combined_text' not in st.session_state: st.session_state.combined_text = None
+
+# --- SIDEBAR ---
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    # Show API key status
-    st.subheader("🔑 API Settings")
-    if api_key:
-        st.success("✅ Groq API Key loaded from Streamlit Secrets")
-    else:
-        st.error("❌ Groq API Key not found in secrets.toml")
-        st.info("Add it in Streamlit → Settings → Secrets")
-
-    # Model name from secrets
-    if "model_name" in st.secrets:
-        st.info(f"📦 Model Loaded: {model_name}")
-    else:
-        st.warning("⚠️ Model not found in secrets. Using default: llama-3.3-70b-versatile")
-
-    st.divider()
-    
-    st.subheader("📋 Features to Analyze")
-    feature_input_method = st.radio(
-        "Input Method",
-        ["Manual Entry", "Upload JSON"]
+    # NEW: Mode Selection
+    analysis_mode = st.radio(
+        "Select Analysis Mode",
+        ["Structured", "Unstructured"],
+        help="Structured: Map to specific features. Unstructured: Extract everything discovered."
     )
     
-    features_list = []
+    st.divider()
     
-    if feature_input_method == "Manual Entry":
-        feature_text = st.text_area(
-            "Enter features (one per line)",
-            height=150,
-            placeholder="Feature 1\nFeature 2\nFeature 3"
-        )
+    # API Key check
+    if api_key: st.success("✅ API Key Loaded")
+    else: st.error("❌ API Key Missing")
+
+    # Feature List (Only if Structured)
+    features_list = []
+    if analysis_mode == "Structured":
+        st.subheader("📋 Features to Analyze")
+        feature_text = st.text_area("Enter features (one per line)", placeholder="Login\nRegistration")
         if feature_text:
             features_list = [f.strip() for f in feature_text.split('\n') if f.strip()]
     else:
-        uploaded_json = st.file_uploader("Upload features JSON", type=['json'])
-        if uploaded_json:
-            try:
-                features_data = json.load(uploaded_json)
-                if isinstance(features_data, list):
-                    features_list = features_data
-                elif isinstance(features_data, dict) and 'features_to_describe' in features_data:
-                    features_list = features_data['features_to_describe']
-                else:
-                    st.error("JSON should be a list or contain 'features_to_describe' key")
-            except Exception as e:
-                st.error(f"Error reading JSON: {e}")
-    
-    if features_list:
-        st.success(f"✅ {len(features_list)} features loaded")
+        st.info("ℹ️ In Unstructured mode, the AI will automatically identify all headings and requirements.")
 
-# config = load_config()
+# --- MAIN UI ---
+st.markdown('<p class="main-header">📄 Requirement Analysis Tool</p>', unsafe_allow_html=True)
 
-# # Initialize session state
-# if 'descriptions' not in st.session_state:
-#     st.session_state.descriptions = None
-# if 'pdf_text' not in st.session_state:
-#     st.session_state.pdf_text = None
-# if 'config' not in st.session_state:
-#     st.session_state.config = config
-
-
-# # Main UI
-# st.markdown('<p class="main-header">📄 Feature Description Generator</p>', unsafe_allow_html=True)
-# st.markdown('<p class="sub-header">Automatically generate detailed feature descriptions from your FSD documents using AI</p>', unsafe_allow_html=True)
-
-# # Sidebar for configuration
-# with st.sidebar:
-#     st.header("⚙️ Configuration")
-    
-#     # Show API key status
-#     st.subheader("🔑 API Settings")
-#     if st.session_state.config and 'google_api_key' in st.session_state.config:
-#         st.success("✅ API Key loaded from config.json")
-#         api_key = st.session_state.config['google_api_key']
-#     else:
-#         st.error("❌ API Key not found in config.json")
-#         st.info("Please add 'google_api_key' to your config.json file")
-#         api_key = None
-    
-#     # Model selection from config
-#     if st.session_state.config and 'model_name' in st.session_state.config:
-#         model_name = st.session_state.config['model_name']
-#         st.info(f"📦 Model: {model_name} (from config.json)")
-#     else:
-#         st.warning("⚠️ Model not found in config.json, using default")
-#         model_name = "gemini-1.5-flash"
-    
-#     st.divider()
-    
-#     st.subheader("📋 Features to Analyze")
-#     feature_input_method = st.radio(
-#         "Input Method",
-#         ["Manual Entry", "Upload JSON"]
-#     )
-    
-#     features_list = []
-    
-#     if feature_input_method == "Manual Entry":
-#         feature_text = st.text_area(
-#             "Enter features (one per line)",
-#             height=150,
-#             placeholder="Feature 1\nFeature 2\nFeature 3"
-#         )
-#         if feature_text:
-#             features_list = [f.strip() for f in feature_text.split('\n') if f.strip()]
-#     else:
-#         uploaded_json = st.file_uploader("Upload features JSON", type=['json'])
-#         if uploaded_json:
-#             try:
-#                 features_data = json.load(uploaded_json)
-#                 if isinstance(features_data, list):
-#                     features_list = features_data
-#                 elif isinstance(features_data, dict) and 'features_to_describe' in features_data:
-#                     features_list = features_data['features_to_describe']
-#                 else:
-#                     st.error("JSON should be a list or contain 'features_to_describe' key")
-#             except Exception as e:
-#                 st.error(f"Error reading JSON: {e}")
-    
-#     if features_list:
-#         st.success(f"✅ {len(features_list)} features loaded")
-
-# Main content area
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.header("📤 Upload Document")
-    uploaded_pdf = st.file_uploader(
-        "Upload your FSD PDF",
-        type=['pdf'],
-        help="Upload the Functional Specification Document"
+    st.header("📤 Upload Documents")
+    uploaded_files = st.file_uploader(
+        "Upload FSD Files", 
+        type=['pdf', 'txt', 'docx'], 
+        accept_multiple_files=True
     )
     
-    if uploaded_pdf:
-        st.success(f"✅ File uploaded: {uploaded_pdf.name}")
-        
-        if st.button("🔍 Extract Text from PDF"):
-            with st.spinner("Extracting text..."):
-                pdf_text = extract_text_from_pdf(uploaded_pdf)
-                if pdf_text:
-                    st.session_state.pdf_text = pdf_text
-                    st.success(f"✅ Extracted {len(pdf_text)} characters")
-                    
-                    with st.expander("📖 Preview Extracted Text"):
-                        st.text_area("Document Text", pdf_text[:2000] + "..." if len(pdf_text) > 2000 else pdf_text, height=300)
+    if uploaded_files:
+        if st.button("🔍 Process and Extract Text"):
+            all_text = ""
+            for uploaded_file in uploaded_files:
+                with st.spinner(f"Reading {uploaded_file.name}..."):
+                    all_text += f"\n--- Start of {uploaded_file.name} ---\n"
+                    all_text += extract_text_from_file(uploaded_file)
+            
+            st.session_state.combined_text = all_text
+            st.success(f"✅ Extracted text from {len(uploaded_files)} files.")
 
 with col2:
-    st.header("🚀 Generate Descriptions")
+    st.header("🚀 Run Analysis")
     
-    can_generate = (
-        api_key and 
-        features_list and 
-        st.session_state.pdf_text is not None
-    )
-    
-    if not api_key:
-        st.warning("⚠️ Please enter your Groq API key in the sidebar")
-    if not features_list:
-        st.warning("⚠️ Please add features to analyze in the sidebar")
-    if st.session_state.pdf_text is None:
-        st.warning("⚠️ Please upload and extract text from a PDF")
-    
-    if can_generate:
-        st.info(f"Ready to analyze {len(features_list)} features")
-        
-        if st.button("✨ Generate Feature Descriptions", disabled=not can_generate):
-            descriptions = generate_feature_descriptions(
-                st.session_state.pdf_text,
-                features_list,
-                api_key,
-                model_name
-            )
-            
-            if descriptions:
-                st.session_state.descriptions = descriptions
-                st.success("✅ Descriptions generated successfully!")
+    # Logic for enabling button
+    ready = api_key and st.session_state.combined_text
+    if analysis_mode == "Structured" and not features_list:
+        ready = False
 
-# Display results
+    if st.button("✨ Generate Requirements", disabled=not ready):
+        results = generate_descriptions(
+            st.session_state.combined_text,
+            features_list,
+            api_key,
+            model_name,
+            analysis_mode
+        )
+        if results:
+            st.session_state.descriptions = results
+
+# --- RESULTS ---
 if st.session_state.descriptions:
-    st.header("📊 Generated Feature Descriptions")
+    st.header(f"📊 Results: {analysis_mode} Mode")
     
-    # Download button
-    json_output = json.dumps(st.session_state.descriptions, indent=2)
     st.download_button(
-        label="💾 Download as JSON",
-        data=json_output,
-        file_name="feature_descriptions.json",
-        mime="application/json"
+        "💾 Download Full Results (JSON)",
+        data=json.dumps(st.session_state.descriptions, indent=2),
+        file_name="requirements_output.json"
     )
-    
-    st.divider()
-    
-    # Display each feature
-    for idx, (feature, description) in enumerate(st.session_state.descriptions.items(), 1):
+
+    for idx, (title, content) in enumerate(st.session_state.descriptions.items(), 1):
         with st.container():
-            st.markdown(f"""
-                <div class="feature-box">
-                    <h3>🎯 Feature {idx}: {feature}</h3>
-                </div>
-            """, unsafe_allow_html=True)
-            
-            st.markdown(description)
-            
-            # Individual download button for each feature
-            col1, col2, col3 = st.columns([2, 1, 1])
-            with col3:
-                feature_json = json.dumps({feature: description}, indent=2)
-                st.download_button(
-                    label="Download",
-                    data=feature_json,
-                    file_name=f"{feature.replace(' ', '_')}.json",
-                    mime="application/json",
-                    key=f"download_{idx}"
-                )
-            
+            st.markdown(f'<div class="feature-box"><h3>{idx}. {title}</h3></div>', unsafe_allow_html=True)
+            st.markdown(content)
             st.divider()
 
-# Footer
-st.markdown("---")
-st.markdown(
-    "<p style='text-align: center; color: #666;'>Built with ❤️ using Streamlit and Google Generative AI</p>",
-    unsafe_allow_html=True
-
-)
-
+st.markdown("<p style='text-align: center; color: #666;'>Built with Streamlit & Groq AI</p>", unsafe_allow_html=True)
