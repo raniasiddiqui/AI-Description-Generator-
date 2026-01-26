@@ -18,13 +18,14 @@ st.set_page_config(
 
 # --- HELPER FUNCTIONS ---
 
-def load_config(config_path: str = "config.json") -> dict:
-    try:
-        with open(config_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {}
-
+# def load_config(config_path: str = "config.json") -> dict:
+    # try:
+    #     with open(config_path, "r", encoding="utf-8") as f:
+    #         return json.load(f)
+    # except Exception:
+    #     return {}
+api_key = st.secrets.get("groq_api_key", None)
+model_name = st.secrets.get("groq_default_model", "llama-3.3-70b-versatile")
 
 def extract_text_from_file(uploaded_file) -> str:
     """Extracts text from PDF, TXT, or DOCX."""
@@ -225,9 +226,9 @@ button[data-testid="stFileUploaderBrowseButton"]:hover {
 
 
 # --- SESSION STATE & CONFIG ---
-config = load_config()
-api_key = config.get("groq_api_key", "")
-model_name = config.get("groq_default_model", "llama-3.3-70b-versatile")
+
+api_key = st.secrets.get("groq_api_key", None)
+model_name = st.secrets.get("groq_default_model", "llama-3.3-70b-versatile")
 
 if 'descriptions' not in st.session_state: st.session_state.descriptions = None
 if 'combined_text' not in st.session_state: st.session_state.combined_text = None
@@ -246,8 +247,8 @@ with st.sidebar:
     st.divider()
     
     # API Key check
-    if api_key: st.success("✅ API Key Loaded")
-    else: st.error("❌ API Key Missing")
+    # if api_key: st.success("✅ API Key Loaded")
+    # else: st.error("❌ API Key Missing")
 
     # Feature List (Only if Structured)
     features_list = []
@@ -319,3 +320,4 @@ if st.session_state.descriptions:
             st.divider()
 
 st.markdown("<p style='text-align: center; color: #666;'>Built with Streamlit & Groq AI</p>", unsafe_allow_html=True)
+
